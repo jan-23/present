@@ -38,3 +38,6 @@ npm run typecheck
 ```
 
 `dist/present.js` is committed so `index.html` works straight from a checkout.
+
+CI (`.github/workflows/build.yml`) typechecks and builds every push and pull request. On `main` it commits the
+rebuilt `dist/present.js` automatically, and every run offers a ready-to-use zip (`index.html` + `dist/`) under *Artifacts*.

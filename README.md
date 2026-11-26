@@ -21,7 +21,7 @@ Dead simple local presenter for a folder of images and videos. No server, no ins
 | Video time | Slider, play/pause, or type a time like `1:23` and press Enter |
 
 - Images and videos are shown to **fit** the screen (letterboxed, never cropped). Videos start automatically and **loop**.
-- The **next** item is preloaded in the screen window, so advancing is instant (nothing else is kept in memory).
+- The **next** item is preloaded, so advancing is instant. Clicking any other item keeps the old one on screen until the new one is ready – never black in between.
 - The current item is marked blue (red while blacked out), the next one dashed; the list scrolls so both stay visible.
 - The slider top right sets the **thumbnail size**.
 - The order is saved to `.present-order.json` inside the media folder. New files appear at the end.

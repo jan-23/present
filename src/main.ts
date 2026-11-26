@@ -35,6 +35,7 @@ let black = true;
 // It only holds the current item and the preloaded next one; everything else is dropped.
 let screenWin: Window | null = null;
 let screenEls = new Map<string, MediaEl>();
+let shown: MediaEl | null = null; // what's visible on the screen right now
 let vid: HTMLVideoElement | null = null; // the current video on the screen, if any
 let hint: HTMLElement | null = null;
 
@@ -236,25 +237,56 @@ function toggleBlack() {
   updateTiles();
 }
 
-/** Make the current item the visible one on the screen; videos start from the beginning. */
+/**
+ * Switch the screen to the current item. The old item stays visible until the new one
+ * has a frame ready, so there's never black in between. Videos start from the beginning.
+ */
+let presentToken = 0;
 function present() {
-  syncScreen();
-  vid = null;
-  for (const [name, el] of screenEls) {
-    const on = name === current;
-    el.hidden = !on;
-    if (el.tagName === "VIDEO") {
-      const v = el as HTMLVideoElement;
-      if (on) {
-        vid = v;
-        v.currentTime = 0;
-      } else if (!v.paused) v.pause();
-    }
-  }
-  applyBlack();
   updateTiles();
-  updateVideoBar();
   scrollToCurrent();
+  syncScreen();
+  const el = current ? screenEls.get(current) : undefined;
+  if (!el || el === shown) {
+    // Nothing to wait for (no screen, nothing selected, or same item again).
+    if (!el) shown?.setAttribute("hidden", "");
+    swapTo(el ?? null);
+    return;
+  }
+  const token = ++presentToken;
+  vid = null; // the bar shows "loading…" until the swap
+  updateVideoBar();
+  whenReady(el).then(() => token === presentToken && swapTo(el));
+}
+
+function swapTo(el: MediaEl | null) {
+  presentToken++;
+  if (el) el.hidden = false;
+  if (shown && shown !== el) {
+    shown.hidden = true;
+    if (shown.tagName === "VIDEO") (shown as HTMLVideoElement).pause();
+  }
+  shown = el;
+  vid = el?.tagName === "VIDEO" ? (el as HTMLVideoElement) : null;
+  if (vid) vid.currentTime = 0;
+  syncScreen(); // the old one can go now
+  applyBlack();
+  updateVideoBar();
+}
+
+/** Resolves once the element can be shown without a black frame (or gives up after 5s). */
+function whenReady(el: MediaEl): Promise<unknown> {
+  const timeout = new Promise((r) => setTimeout(r, 5000));
+  if (el.tagName === "IMG") return Promise.race([(el as HTMLImageElement).decode().catch(() => {}), timeout]);
+  const v = el as HTMLVideoElement;
+  if (v.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) return Promise.resolve();
+  return Promise.race([
+    new Promise((r) => {
+      v.addEventListener("loadeddata", r, { once: true });
+      v.addEventListener("error", r, { once: true });
+    }),
+    timeout,
+  ]);
 }
 
 /** Black hides the media and pauses video; un-blacking resumes where it was. */
@@ -327,24 +359,25 @@ async function openScreen() {
   d.onclick = fullscreen;
   d.onkeydown = (e) => (e.key === "f" || e.key === "F" ? fullscreen() : onKey(e));
   w.onpagehide = () => {
-    screenWin = vid = hint = null;
+    screenWin = shown = vid = hint = null;
     screenEls = new Map();
     screenBtn.classList.remove("active");
     updateVideoBar();
   };
   screenBtn.classList.add("active");
   screenEls = new Map();
+  shown = vid = null;
   present();
 }
 
-/** Keep exactly the current and the next item in the screen window (next one hidden, preloading). */
+/** Keep only the current and the next item (plus whatever is still visible) in the screen window. */
 function syncScreen() {
   if (!screenWin) return;
   const i = currentIndex();
   const wanted = [items[i], items[i + 1]].filter((x): x is Item => !!x);
   const keep = new Set(wanted.map((x) => x.name));
   for (const [name, el] of screenEls) {
-    if (!keep.has(name)) {
+    if (!keep.has(name) && el !== shown) {
       dropEl(el);
       screenEls.delete(name);
     }
@@ -357,7 +390,7 @@ function syncScreen() {
 function clearScreen() {
   screenEls.forEach(dropEl);
   screenEls = new Map();
-  vid = null;
+  shown = vid = null;
 }
 
 function createEl(d: Document, item: Item): MediaEl {
@@ -412,7 +445,7 @@ function updateVideoBar() {
   const isVideo = currentItem()?.kind === "video";
   bar.hidden = !isVideo;
   if (!isVideo || !vid) {
-    timeLabel.textContent = isVideo ? "open the screen window first" : "";
+    timeLabel.textContent = !isVideo ? "" : screenWin ? "loading…" : "open the screen window first";
     return;
   }
   seek.max = String(vid.duration || 0);

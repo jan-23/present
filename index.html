@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Present</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 14px system-ui, sans-serif; background: #1b1b1d; color: #ddd; display: flex; flex-direction: column; min-height: 100vh; }
+    #grid { flex: 1; align-content: start; }
+    header, #videobar { position: sticky; display: flex; gap: 8px; align-items: center; padding: 8px 12px; background: #111; z-index: 1; }
+    header { top: 0; }
+    #videobar { bottom: 0; }
+    #folder { font-weight: 600; margin-right: auto; }
+    button { font: inherit; padding: 6px 12px; border: 1px solid #444; border-radius: 6px; background: #2a2a2e; color: #ddd; cursor: pointer; }
+    button:hover { background: #36363b; }
+    button.active { background: #b03030; border-color: #d04040; color: #fff; }
+    #screen.active { background: #2d6a3a; border-color: #3c8a4c; }
+    #grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; padding: 12px; }
+    .tile { position: relative; aspect-ratio: 16/9; background: #000; border: 3px solid transparent; border-radius: 8px; overflow: hidden; cursor: pointer; user-select: none; }
+    .tile:hover { border-color: #555; }
+    .tile.current { border-color: #4a9eff; }
+    .tile.current.blacked { border-color: #b03030; }
+    .tile img, .tile video { width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+    .label { position: absolute; left: 0; right: 0; bottom: 0; padding: 3px 6px; background: rgba(0,0,0,.7); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .sortable-ghost { opacity: .3; }
+    #empty { padding: 40px; text-align: center; color: #888; }
+    #seek { flex: 1; }
+    #time { font-variant-numeric: tabular-nums; min-width: 110px; }
+    #jump { width: 80px; padding: 6px; border: 1px solid #444; border-radius: 6px; background: #222; color: #ddd; font: inherit; }
+    kbd { border: 1px solid #555; border-radius: 3px; padding: 0 4px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <span id="folder">Present</span>
+    <button id="open">📁 Open folder</button>
+    <button id="reopen">↻ Reopen last</button>
+    <button id="screen" title="Open the output window for the second screen">🖥 Screen</button>
+    <button id="black" class="active" title="B or .">⬛ Black</button>
+  </header>
+  <div id="empty">
+    Open a folder with images and videos.<br><br>
+    Click = show · Drag = reorder · <kbd>Space</kbd>/<kbd>→</kbd> next · <kbd>←</kbd> previous · <kbd>B</kbd> black · <kbd>F</kbd> (in screen window) fullscreen
+  </div>
+  <div id="grid"></div>
+  <div id="videobar" hidden>
+    <button id="play">▶ Play</button>
+    <input id="seek" type="range" min="0" step="0.1" value="0">
+    <span id="time"></span>
+    <form id="jumpform"><input id="jump" placeholder="m:ss" title="Jump to time, e.g. 1:23 – Enter"></form>
+  </div>
+  <script src="dist/present.js"></script>
+</body>
+</html>

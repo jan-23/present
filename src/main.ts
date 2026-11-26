@@ -32,7 +32,7 @@ let current: string | null = null; // name of the selected item
 let black = true;
 
 // Second-screen window. It's a same-origin about:blank popup, so we drive its DOM directly.
-// It holds one preloaded element per item; switching just changes which one is visible.
+// It only holds the current item and the preloaded next one; everything else is dropped.
 let screenWin: Window | null = null;
 let screenEls = new Map<string, MediaEl>();
 let vid: HTMLVideoElement | null = null; // the current video on the screen, if any
@@ -72,7 +72,7 @@ async function loadFolder(handle: FileSystemDirectoryHandle) {
   document.title = `Present – ${handle.name}`;
   $("#folder").textContent = handle.name;
   render();
-  buildScreen();
+  clearScreen(); // object URLs changed
   present();
 }
 
@@ -188,6 +188,7 @@ Sortable.create(grid, {
     const [moved] = items.splice(e.oldIndex, 1);
     items.splice(e.newIndex, 0, moved);
     updateTiles();
+    syncScreen(); // the next item may have changed
     saveOrder();
   },
 });
@@ -237,6 +238,7 @@ function toggleBlack() {
 
 /** Make the current item the visible one on the screen; videos start from the beginning. */
 function present() {
+  syncScreen();
   vid = null;
   for (const [name, el] of screenEls) {
     const on = name === current;
@@ -331,40 +333,59 @@ async function openScreen() {
     updateVideoBar();
   };
   screenBtn.classList.add("active");
-  buildScreen();
+  screenEls = new Map();
   present();
 }
 
-/** One element per item in the screen window, all preloaded, all but the current one hidden. */
-function buildScreen() {
+/** Keep exactly the current and the next item in the screen window (next one hidden, preloading). */
+function syncScreen() {
   if (!screenWin) return;
-  const d = screenWin.document;
-  screenEls.forEach((el) => {
-    el.removeAttribute("src");
-    if (el.tagName === "VIDEO") (el as HTMLVideoElement).load(); // free the decoder
-    el.remove();
-  });
+  const i = currentIndex();
+  const wanted = [items[i], items[i + 1]].filter((x): x is Item => !!x);
+  const keep = new Set(wanted.map((x) => x.name));
+  for (const [name, el] of screenEls) {
+    if (!keep.has(name)) {
+      dropEl(el);
+      screenEls.delete(name);
+    }
+  }
+  for (const item of wanted) {
+    if (!screenEls.has(item.name)) screenEls.set(item.name, createEl(screenWin.document, item));
+  }
+}
+
+function clearScreen() {
+  screenEls.forEach(dropEl);
   screenEls = new Map();
   vid = null;
-  for (const item of items) {
-    let el: MediaEl;
-    if (item.kind === "image") {
-      el = d.createElement("img");
-      el.decoding = "sync"; // no flash of black when switching
-    } else {
-      const v = (el = d.createElement("video"));
-      v.preload = "auto";
-      v.loop = true;
-      v.playsInline = true;
-      for (const ev of ["timeupdate", "durationchange", "play", "pause", "seeked"]) {
-        v.addEventListener(ev, () => v === vid && updateVideoBar());
-      }
-    }
-    el.hidden = true;
+}
+
+function createEl(d: Document, item: Item): MediaEl {
+  let el: MediaEl;
+  if (item.kind === "image") {
+    el = d.createElement("img");
+    el.decoding = "sync"; // no flash of black when switching
     el.src = item.url;
-    screenEls.set(item.name, el);
-    d.body.prepend(el);
+    el.decode().catch(() => {}); // decode now, while still hidden
+  } else {
+    const v = (el = d.createElement("video"));
+    v.preload = "auto";
+    v.loop = true;
+    v.playsInline = true;
+    v.src = item.url;
+    for (const ev of ["timeupdate", "durationchange", "play", "pause", "seeked"]) {
+      v.addEventListener(ev, () => v === vid && updateVideoBar());
+    }
   }
+  el.hidden = true;
+  d.body.prepend(el);
+  return el;
+}
+
+function dropEl(el: MediaEl) {
+  el.removeAttribute("src");
+  if (el.tagName === "VIDEO") (el as HTMLVideoElement).load(); // free the decoder
+  el.remove();
 }
 
 function showHint(text: string) {

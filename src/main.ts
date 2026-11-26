@@ -1,10 +1,17 @@
 import Sortable from "sortablejs";
 import { get, set } from "idb-keyval";
 
-// File System Access API bits missing from TS's DOM lib.
+// Browser APIs missing from TS's DOM lib (File System Access + Window Management).
 declare global {
   interface Window {
     showDirectoryPicker(opts?: { mode?: "read" | "readwrite"; id?: string }): Promise<FileSystemDirectoryHandle>;
+    getScreenDetails?(): Promise<{ screens: ScreenDetailed[]; currentScreen: ScreenDetailed }>;
+  }
+  interface ScreenDetailed extends Screen {
+    availLeft: number;
+    availTop: number;
+    left: number;
+    top: number;
   }
   interface FileSystemHandle {
     queryPermission(opts?: { mode?: "read" | "readwrite" }): Promise<PermissionState>;
@@ -13,6 +20,7 @@ declare global {
 }
 
 type Item = { name: string; kind: "image" | "video"; url: string };
+type MediaEl = HTMLImageElement | HTMLVideoElement;
 
 const ORDER_FILE = ".present-order.json";
 const IMAGE = /\.(jpe?g|png|gif|webp|avif|svg|bmp)$/i;
@@ -23,13 +31,15 @@ let items: Item[] = [];
 let current: string | null = null; // name of the selected item
 let black = true;
 
-// Second-screen window and its elements (we drive its DOM directly; it's same-origin about:blank).
+// Second-screen window. It's a same-origin about:blank popup, so we drive its DOM directly.
+// It holds one preloaded element per item; switching just changes which one is visible.
 let screenWin: Window | null = null;
-let img: HTMLImageElement | null = null;
-let vid: HTMLVideoElement | null = null;
+let screenEls = new Map<string, MediaEl>();
+let vid: HTMLVideoElement | null = null; // the current video on the screen, if any
 let hint: HTMLElement | null = null;
 
 const $ = <T extends HTMLElement = HTMLElement>(sel: string) => document.querySelector(sel) as T;
+const header = $("header");
 const grid = $("#grid");
 const bar = $("#videobar");
 const playBtn = $<HTMLButtonElement>("#play");
@@ -38,6 +48,7 @@ const timeLabel = $("#time");
 const jump = $<HTMLInputElement>("#jump");
 const blackBtn = $<HTMLButtonElement>("#black");
 const screenBtn = $<HTMLButtonElement>("#screen");
+const sizeSlider = $<HTMLInputElement>("#size");
 
 // ---------- folder + order ----------
 
@@ -61,6 +72,7 @@ async function loadFolder(handle: FileSystemDirectoryHandle) {
   document.title = `Present – ${handle.name}`;
   $("#folder").textContent = handle.name;
   render();
+  buildScreen();
   present();
 }
 
@@ -135,15 +147,38 @@ function render() {
   updateTiles();
 }
 
+/** Numbers, "current" (blue, red when blacked out) and "next" (dashed) markers. */
 function updateTiles() {
+  const nextName = items[currentIndex() + 1]?.name;
   grid.querySelectorAll<HTMLElement>(".tile").forEach((tile, i) => {
+    const name = tile.dataset.name;
     tile.querySelector("b")!.textContent = String(i + 1);
-    tile.classList.toggle("current", tile.dataset.name === current);
-    tile.classList.toggle("blacked", tile.dataset.name === current && black);
+    tile.classList.toggle("current", name === current);
+    tile.classList.toggle("blacked", name === current && black);
+    tile.classList.toggle("next", name === nextName);
   });
   blackBtn.classList.toggle("active", black);
-  const sel = grid.querySelector(".current");
-  sel?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+/** Scroll so the current and the next tile are both visible (between header and video bar). */
+let scrollTarget: number | null = null; // where a running smooth scroll is heading
+window.addEventListener("scrollend", () => (scrollTarget = null));
+function scrollToCurrent() {
+  const tiles = [...grid.querySelectorAll<HTMLElement>(".current, .next")];
+  if (!tiles.length) return;
+  const base = scrollTarget ?? window.scrollY;
+  // Page coordinates, as seen once the running scroll (if any) has finished.
+  const rects = tiles.map((t) => t.getBoundingClientRect());
+  const top = Math.min(...rects.map((r) => r.top)) + window.scrollY - base;
+  const bottom = Math.max(...rects.map((r) => r.bottom)) + window.scrollY - base;
+  const minY = header.offsetHeight + 8;
+  const maxY = window.innerHeight - (bar.hidden ? 0 : bar.offsetHeight) - 8;
+  let dy = 0;
+  if (top < minY) dy = top - minY;
+  else if (bottom > maxY) dy = Math.min(bottom - maxY, top - minY); // never push the current one off the top
+  if (!dy) return;
+  scrollTarget = base + dy;
+  window.scrollTo({ top: scrollTarget, behavior: "smooth" });
 }
 
 Sortable.create(grid, {
@@ -155,6 +190,23 @@ Sortable.create(grid, {
     updateTiles();
     saveOrder();
   },
+});
+
+// Thumbnail size, remembered per browser.
+function setThumbSize(px: number) {
+  grid.style.setProperty("--thumb", `${px}px`);
+  sizeSlider.value = String(px);
+}
+try {
+  setThumbSize(Number(localStorage.getItem("thumb")) || 200);
+} catch {
+  setThumbSize(200);
+}
+sizeSlider.addEventListener("input", () => {
+  setThumbSize(Number(sizeSlider.value));
+  try {
+    localStorage.setItem("thumb", sizeSlider.value);
+  } catch {}
 });
 
 // ---------- presenting ----------
@@ -183,36 +235,32 @@ function toggleBlack() {
   updateTiles();
 }
 
-/** Put the current item on the second screen (restarts videos). */
+/** Make the current item the visible one on the screen; videos start from the beginning. */
 function present() {
-  updateTiles();
-  updateVideoBar();
-  if (!img || !vid) return;
-  const item = currentItem();
-  vid.pause();
-  if (item?.kind === "image") {
-    img.src = item.url;
-    img.hidden = false;
-    vid.hidden = true;
-    vid.removeAttribute("src");
-    vid.load();
-  } else if (item?.kind === "video") {
-    img.hidden = true;
-    img.removeAttribute("src");
-    vid.hidden = false;
-    vid.src = item.url;
-  } else {
-    img.hidden = vid.hidden = true;
+  vid = null;
+  for (const [name, el] of screenEls) {
+    const on = name === current;
+    el.hidden = !on;
+    if (el.tagName === "VIDEO") {
+      const v = el as HTMLVideoElement;
+      if (on) {
+        vid = v;
+        v.currentTime = 0;
+      } else if (!v.paused) v.pause();
+    }
   }
   applyBlack();
+  updateTiles();
+  updateVideoBar();
+  scrollToCurrent();
 }
 
 /** Black hides the media and pauses video; un-blacking resumes where it was. */
 function applyBlack() {
-  if (!screenWin || !vid) return;
-  screenWin.document.body.classList.toggle("black", black);
+  screenWin?.document.body.classList.toggle("black", black);
+  if (!vid) return;
   if (black) vid.pause();
-  else if (currentItem()?.kind === "video") play();
+  else play();
 }
 
 function play() {
@@ -221,49 +269,102 @@ function play() {
 
 // ---------- second screen window ----------
 
-function openScreen() {
-  const w = window.open("", "present-screen", "popup,width=960,height=540");
-  if (!w) return alert("Popup blocked – allow popups for this page.");
+/** The screen that isn't the laptop's, if the browser lets us know (Window Management API). */
+let otherScreen: ScreenDetailed | null = null;
+async function findOtherScreen() {
+  try {
+    const details = await window.getScreenDetails!();
+    otherScreen = details.screens.find((s) => s !== details.currentScreen) ?? null;
+  } catch {
+    otherScreen = null;
+  }
+}
+// If permission was already given earlier, look it up now, so the click can open the window right away.
+navigator.permissions
+  ?.query({ name: "window-management" as PermissionName })
+  .then((p) => {
+    if (p.state === "granted") return findOtherScreen();
+  })
+  .catch(() => {});
+
+async function openScreen() {
+  if (screenWin && !screenWin.closed) return screenWin.focus();
+  let asked = false;
+  if (!otherScreen && window.getScreenDetails) {
+    asked = true;
+    await findOtherScreen(); // may show the permission prompt once
+  }
+  const s = otherScreen;
+  const features = s
+    ? `popup,fullscreen,left=${s.availLeft},top=${s.availTop},width=${s.availWidth},height=${s.availHeight}`
+    : "popup,width=960,height=540";
+  const w = window.open("", "present-screen", features);
+  if (!w) {
+    alert(asked ? "Click 🖥 Screen again to open the screen window." : "Popup blocked – allow popups for this page.");
+    return;
+  }
   screenWin = w;
   const d = w.document;
   d.title = "Present – Screen";
   d.head.innerHTML = `<style>
-    html,body{margin:0;height:100%;background:#000;overflow:hidden}
-    body.fs{cursor:none}
+    html,body{margin:0;height:100%;background:#000;overflow:hidden;cursor:none}
     img,video{position:fixed;inset:0;width:100%;height:100%;object-fit:contain;background:#000}
     [hidden],body.black img,body.black video{display:none!important}
     #hint{position:fixed;inset:auto 0 40% 0;text-align:center;font:24px system-ui;color:#aaa}
   </style>`;
-  img = d.createElement("img");
-  vid = d.createElement("video");
-  vid.playsInline = true;
-  hint = d.createElement("div");
-  hint.id = "hint";
-  hint.textContent = "Move this window to the second screen, then click here (or press F) for fullscreen";
-  d.body.replaceChildren(img, vid, hint);
   d.body.className = "";
+  d.body.replaceChildren();
+  hint = null;
+  if (!s) showHint("Move this window to the second screen, then click here (or press F) for fullscreen");
 
   const fullscreen = () => {
     hint?.remove();
     if (!d.fullscreenElement) d.documentElement.requestFullscreen().catch(() => {});
-    if (vid && !vid.hidden && vid.paused && !black) play();
+    if (vid && vid.paused && !black) play();
   };
   d.onclick = fullscreen;
   d.onkeydown = (e) => (e.key === "f" || e.key === "F" ? fullscreen() : onKey(e));
-  d.onfullscreenchange = () => d.body.classList.toggle("fs", !!d.fullscreenElement);
-  for (const ev of ["timeupdate", "durationchange", "play", "pause", "loadedmetadata"]) {
-    vid.addEventListener(ev, updateVideoBar);
-  }
-  vid.addEventListener("loadeddata", () => {
-    if (!black) play();
-  });
   w.onpagehide = () => {
-    screenWin = img = vid = hint = null;
+    screenWin = vid = hint = null;
+    screenEls = new Map();
     screenBtn.classList.remove("active");
     updateVideoBar();
   };
   screenBtn.classList.add("active");
+  buildScreen();
   present();
+}
+
+/** One element per item in the screen window, all preloaded, all but the current one hidden. */
+function buildScreen() {
+  if (!screenWin) return;
+  const d = screenWin.document;
+  screenEls.forEach((el) => {
+    el.removeAttribute("src");
+    if (el.tagName === "VIDEO") (el as HTMLVideoElement).load(); // free the decoder
+    el.remove();
+  });
+  screenEls = new Map();
+  vid = null;
+  for (const item of items) {
+    let el: MediaEl;
+    if (item.kind === "image") {
+      el = d.createElement("img");
+      el.decoding = "sync"; // no flash of black when switching
+    } else {
+      const v = (el = d.createElement("video"));
+      v.preload = "auto";
+      v.loop = true;
+      v.playsInline = true;
+      for (const ev of ["timeupdate", "durationchange", "play", "pause", "seeked"]) {
+        v.addEventListener(ev, () => v === vid && updateVideoBar());
+      }
+    }
+    el.hidden = true;
+    el.src = item.url;
+    screenEls.set(item.name, el);
+    d.body.prepend(el);
+  }
 }
 
 function showHint(text: string) {
@@ -310,7 +411,6 @@ playBtn.addEventListener("click", () => {
     black = false;
     applyBlack();
     updateTiles();
-    play();
   } else vid.pause();
 });
 $("#jumpform").addEventListener("submit", (e) => {
@@ -323,7 +423,7 @@ $("#jumpform").addEventListener("submit", (e) => {
 // ---------- keyboard + buttons ----------
 
 function onKey(e: KeyboardEvent) {
-  if ((e.target as HTMLElement).tagName === "INPUT") return;
+  if ((e.target as HTMLElement).tagName === "INPUT" && (e.target as HTMLInputElement).type !== "range") return;
   switch (e.key) {
     case " ":
     case "ArrowRight":
@@ -347,13 +447,16 @@ function onKey(e: KeyboardEvent) {
   }
 }
 window.addEventListener("keydown", onKey);
-// Space on a focused button would also "click" it on keyup; buttons never keep focus.
+// Space on a focused button/slider would also act on it; controls never keep focus.
 document.addEventListener("click", (e) => (e.target as HTMLElement).closest("button")?.blur());
+document.addEventListener("pointerup", (e) => {
+  if ((e.target as HTMLInputElement).type === "range") (e.target as HTMLElement).blur();
+});
 
 $("#open").addEventListener("click", () => openFolder().catch(console.error));
 $("#reopen").addEventListener("click", () => reopenFolder().catch(console.error));
 blackBtn.addEventListener("click", toggleBlack);
-screenBtn.addEventListener("click", openScreen);
+screenBtn.addEventListener("click", () => openScreen().catch(console.error));
 
 if (!("showDirectoryPicker" in window)) {
   $("#empty").innerHTML = "This needs Chrome or Edge (File System Access API).";
